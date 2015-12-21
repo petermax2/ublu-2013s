@@ -1,0 +1,92 @@
+%{
+#include <stdlib.h>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "tree.h"
+
+short bfe_nextReg = 0; 
+
+char *bfe_TmpReg[] = {
+"%r10", "%r11", "%r12", "%r13", "%r14", "%r15"
+};
+
+char *bfe_ParamReg[] = {
+"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"
+};
+
+
+/* TODO this is a hacky parameter lookup, but it will be replaced in codeb task, so I don't care for now */
+char *bfeGetParamReg(char *id, struct symT *sym) 
+{
+	short index = 0;
+	struct symT *p = sym; 
+	
+	while(p != NULL)
+	{
+		if(strcmp(id, p->name) == 0) { break; }
+		index++;
+		p = p->next;
+	}
+	if(index > 5) { index = 0; }
+	return bfe_ParamReg[index];
+}
+
+#define BFE_NEXT_REG char *r = bfe_TmpReg[bfe_nextReg++]; bnode->reg = r;
+
+#define REG_RET "%rax"
+
+#define MULV(p,q) printf("\timul %s, %s\n", p, q);
+#define MULC(p,q) printf("\timul $%d, %s\n", p, q); 
+#define ADDV(p,q) printf("\taddq %s, %s\n", p, q); 
+#define ADDM(p,q) printf("\taddq (%s),%s\n", p, q); 
+#define SUBV(p,q) printf("\tsubq %s, %s\n", p, q); 
+#define SUBC(p,q) printf("\tsubq $%d, %s\n", p, q); 
+#define MOVV(p,q) printf("\tmovq %s, %s\n", p, q); 
+#define MOVC(p,q) printf("\tmovq $%d, %s\n", p, q);
+#define MOVM(p,q) printf("\tmovq (%s), %s\n", p, q); 
+#define PUSH(p) printf("\tpush %s\n", p);
+#define POP(p) printf("\tpop %s\n", p); 
+
+#define FUNC_PROLOG(f) { printf(".globl %s\n\t.type %s, @function\n%s:\n\t.cfi_startproc\n\tpushq %rbp\n\t.cfi_def_cfa_offset 16\n\tmovq %rsp, %rbp\n\t.cfi_offset 6,-16\n\t.cfi_def_cfa_register 6\n\n",f,f,f); }
+#define FUNC_EPILOG { printf("\tleave\n\tret\n\t.cfi_endproc\n\n"); }
+#define SAVE_TMP_REG { short bfe_tmp_i; for(bfe_tmp_i = 2; bfe_tmp_i <= 5; bfe_tmp_i++) { PUSH(bfe_TmpReg[bfe_tmp_i]) } }
+#define RESC_TMP_REG { short bfe_tmp_i; for(bfe_tmp_i = 5; bfe_tmp_i >= 2; bfe_tmp_i--) { POP(bfe_TmpReg[bfe_tmp_i]) } }
+#define NL printf("\n"); 
+
+%}
+
+%term FUNC=1 RET=2 CONST=3 ADD=4 SUB=5 MUL=6 VARI=7 ARR_DEREF=8
+%start stat
+
+%%
+stat: FUNC				# 0 # FUNC_PROLOG(bnode->id) SAVE_TMP_REG NL
+stat: RET(retexpr)  			# 1 # NL RESC_TMP_REG FUNC_EPILOG bfe_nextReg = 0;
+retexpr: retcon       			# 1 # { MOVC(bnode->number, "%rax") }
+retexpr: retvar				# 1 # { MOVV(bnode->reg, REG_RET) }
+retexpr: retarr				# 1 # { MOVM(bnode->reg, REG_RET) } 
+retarr: ARR_DEREF(arrv,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDV(LEFT_CHILD(bnode)->reg, r)  }
+retarr: ARR_DEREF(arrv,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDV(LEFT_CHILD(bnode)->reg, r)  }
+retarr: ARR_DEREF(arrd,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDM(LEFT_CHILD(bnode)->reg, r) }
+retarr: ARR_DEREF(arrd,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDM(LEFT_CHILD(bnode)->reg, r)  }
+arrd: ARR_DEREF(arrd,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDM(LEFT_CHILD(bnode)->reg, r) }
+arrd: ARR_DEREF(arrd,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDM(LEFT_CHILD(bnode)->reg, r) }
+arrd: ARR_DEREF(arrv,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDV(LEFT_CHILD(bnode)->reg, r)  }
+arrd: ARR_DEREF(arrv,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDV(LEFT_CHILD(bnode)->reg, r)  } 
+arrv: VARI				# 0 # bnode->reg = bfeGetParamReg(bnode->id, bnode->sym);
+retvar: ADD(retvar,retvar)		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) ADDV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: ADD(retvar,retcon)		# 2 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) ADDV(LEFT_CHILD(bnode)->reg, r) }
+retvar: ADD(retcon,retvar)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) ADDV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: SUB(retvar,retvar) 		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) SUBV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: SUB(retvar,retcon)		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) SUBC(RIGHT_CHILD(bnode)->number, r) }
+retvar: SUB(retcon,retvar)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) SUBV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: MUL(retvar,retvar) 		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) MULV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: MUL(retvar,retcon)		# 2 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULV(LEFT_CHILD(bnode)->reg, r) }
+retvar: MUL(retcon,retvar)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) MULV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: VARI				# 0 # bnode->reg = bfeGetParamReg(bnode->id, bnode->sym);
+retcon: ADD(retcon,retcon)		# 0 # bnode->number = LEFT_CHILD(bnode)->number + RIGHT_CHILD(bnode)->number;
+retcon: SUB(retcon,retcon)		# 0 # bnode->number = LEFT_CHILD(bnode)->number - RIGHT_CHILD(bnode)->number; 
+retcon: MUL(retcon,retcon)		# 0 # bnode->number = LEFT_CHILD(bnode)->number * RIGHT_CHILD(bnode)->number; 
+retcon: CONST				# 0 # ; 
+
+

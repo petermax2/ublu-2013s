@@ -1,0 +1,214 @@
+%{
+#include <stdlib.h>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "tree.h"
+#include "ast.h"
+#include "memtab.h"
+
+int bfe_nextReg = 0;
+int bfe_labelNr = 1;
+
+char *bfe_TmpReg[] = { "%rax","%rcx","%rdx","%rsi","%rdi","%r8","%r9","%r10", "%r11" };
+char *bfe_ParamReg[] = { "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9" };
+
+char *bfeGetVarReg(char *id, MemTab memt);
+char *bfeGetNextVarReg(MemTab memt);
+char *bfeSaveParamsToMem(MemTab memt);
+void bfePrintStart(Tree,int,int,int);
+void bfePrintEnd(Tree,int,int,int);
+
+char *bfeGetVarReg(char *id, MemTab memt) {
+        char *reg;
+        short index = -1;
+        short i = 0;
+        MemTab p = memt;
+
+        while(p != NULL) {
+                if(strcmp(p->id, id) == 0) { index = i; }
+                i++;
+                p = p->next;
+        }
+        if(index >= 0) {
+                reg = malloc(13);
+                sprintf(reg, "%d(\%rbp)", ((-8)*(index + 1)));
+                return reg;
+        } else {
+                fprintf(stderr, "FATAL ERROR in memory table: symbol not found %s\n", id);
+                exit(3);
+        }
+        return "";
+}
+
+char *bfeGetNextVarReg(MemTab memt) {
+        char *reg;
+        short c = 0;
+        MemTab p = memt;
+
+        while(p != NULL) {
+                c++;
+                p = p->next;
+        }
+        reg = malloc(13);
+        sprintf(reg, "%d(\%rbp)", ((-8)*(c + 1)));
+        return reg;
+}
+
+char *bfeSaveParamsToMem(MemTab memt) {
+        int i = 0;
+        MemTab p = memt;
+        while(p != NULL && i < 6) {
+                printf("\tmovq %s,%d(%rbp)\n", bfe_ParamReg[i], ((-8)*(i+1)));
+                i++;
+                p = p->next;
+        }
+}
+
+void bfePrintStart(Tree bnode, int labelnr, int ifnr, int elseav) {
+        if(bnode == NULL) {
+                printf(".L%dS", ifnr);
+                return;
+        }
+        switch(OP_LABEL(bnode)) {
+                case LOR:
+                        bfePrintStart(PARENT(bnode), bnode->labelnr, ifnr, elseav);
+                        break;
+
+                case LNOT:
+                        bfePrintEnd(PARENT(bnode), labelnr, ifnr, elseav);
+                        break;
+
+		default:
+			bfePrintStart(PARENT(bnode), labelnr, ifnr, elseav);
+			break;
+        }
+}
+
+void bfePrintEnd(Tree bnode, int labelnr, int ifnr, int elseav) {
+        if(bnode == NULL) {
+                if(elseav == AST_TRUE) { printf(".L%dA", ifnr); }
+                else { printf(".L%dE", ifnr);  }
+                return;
+        }
+        switch(OP_LABEL(bnode)) {
+                case LOR:
+			if(PARENT(bnode) && bnode == RIGHT_CHILD(PARENT(bnode))) {
+				printf("Z%d", labelnr);
+				return;
+			} else {
+				bfePrintEnd(PARENT(bnode), bnode->labelnr, ifnr, elseav);
+			}
+                        break;
+                case LNOT:
+                        bfePrintStart(PARENT(bnode), labelnr, ifnr, elseav);
+                        break;
+		default:
+			bfePrintEnd(PARENT(bnode), labelnr, ifnr, elseav);
+			break;
+        }
+}
+
+#define BFE_NEXT_REG char *r = bfe_TmpReg[bfe_nextReg++]; bnode->reg = r;
+#define BFE_DEF_TMP  char *r = bfe_TmpReg[bfe_nextReg++];
+
+#define REG_RET "%rax"
+
+#define MULV(p,q) printf("\timul %s, %s\n", p, q);
+#define MULC(p,q) printf("\timul $%d, %s\n", p, q); 
+#define MULM(p,q) printf("\timul (%s), %s\n", p, q); 
+#define ADDV(p,q) printf("\taddq %s, %s\n", p, q); 
+#define ADDM(p,q) printf("\taddq (%s),%s\n", p, q); 
+#define SUBV(p,q) printf("\tsubq %s, %s\n", p, q); 
+#define SUBM(p,q) printf("\tsubq (%s), %s\n", p, q); 
+#define SUBC(p,q) printf("\tsubq $%d, %s\n", p, q); 
+#define MOVV(p,q) printf("\tmovq %s, %s\n", p, q); 
+#define MOVAV(p,q) printf("\tmovq %s, (%s)\n", p, q); 
+#define MOVC(p,q) printf("\tmovq $%d, %s\n", p, q);
+#define MOVAC(p,q) printf("\tmovq $%d, (%s)\n", p, q);
+#define MOVM(p,q) printf("\tmovq (%s), %s\n", p, q); 
+#define MOVAM(p,q) printf("\tmovq %s, (%s)\n", p, q);
+#define MOVAA(p,q) printf("\tmovq (%s), (%s)\n", p, q); 
+#define PUSH(p) printf("\tpushq %s\n", p);
+#define POP(p) printf("\tpopq %s\n", p); 
+#define CMP(p,q) printf("\tcmpq %s, %s\n", p, q);
+#define JOP(p,q) printf("\tj%s %s\n", p, q);
+#define JMP(p) printf("\tjmp %s\n", p);
+
+#define FUNC_PROLOG(f) { printf(".globl %s\n\t.type %s, @function\n%s:\n\t.cfi_startproc\n\tpushq %rbp\n\t.cfi_def_cfa_offset 16\n\tmovq %rsp, %rbp\n\t.cfi_offset 6, -16\n\t.cfi_def_cfa_register 6\n",f,f,f); }
+#define FUNC_EPILOG { printf("\tleave\n\tret\n\n"); }
+#define SAVE_TMP_REG { short bfe_tmp_i; for(bfe_tmp_i = 2; bfe_tmp_i <= 5; bfe_tmp_i++) { PUSH(bfe_TmpReg[bfe_tmp_i]) } }
+#define RESC_TMP_REG { short bfe_tmp_i; for(bfe_tmp_i = 5; bfe_tmp_i >= 2; bfe_tmp_i--) { POP(bfe_TmpReg[bfe_tmp_i]) } }
+#define NL printf("\n"); 
+
+%}
+
+%term FUNC=1 RET=2 CONST=3 ADD=4 SUB=5 MUL=6 VARI=7 ARR_DEREF=8
+%term VARDEF=9 VASSIGN=10
+%term LOR=12 LNEQ=13 LLESS=14 LNOT=15
+%start stat
+
+%%
+stat: FUNC				# 0 # FUNC_PROLOG(bnode->id) bfeSaveParamsToMem(bnode->memt); NL bfe_nextReg = 0; 
+stat: RET(retexpr)  			# 1 # FUNC_EPILOG NL bfe_nextReg = 0;
+stat: VARDEF(vdefexpr)			# 0 # NL bfe_nextReg = 0;
+stat: VASSIGN(retvar,retcon)		# 1 # { MOVC(RIGHT_CHILD(bnode)->number, LEFT_CHILD(bnode)->reg) bfe_nextReg = 0; NL }
+stat: VASSIGN(retvar,retvar)		# 2 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MOVV(r, LEFT_CHILD(bnode)->reg) bfe_nextReg = 0; NL }
+stat: VASSIGN(retvar,retarr)		# 1 # { MOVAM(RIGHT_CHILD(bnode)->reg, LEFT_CHILD(bnode)->reg) bfe_nextReg = 0; NL }
+stat: VASSIGN(retarr,retcon)		# 1 # { MOVAC(RIGHT_CHILD(bnode)->number, LEFT_CHILD(bnode)->reg) bfe_nextReg = 0; NL } 
+stat: VASSIGN(retarr,retvar)		# 2 # { BFE_DEF_TMP MOVV(RIGHT_CHILD(bnode)->reg, r) MOVAV(r, LEFT_CHILD(bnode)->reg) bfe_nextReg = 0; NL }
+stat: VASSIGN(retarr,retarr)		# 2 # { BFE_DEF_TMP MOVM(RIGHT_CHILD(bnode)->reg, r) MOVAV(r, LEFT_CHILD(bnode)->reg) bfe_nextReg = 0; NL }
+stat: bterm				# 1 # { printf("\tjmp "); bfePrintEnd(bnode,bnode->labelnr,bnode->ifnr,bnode->belseav); NL  bfe_nextReg = 0; NL }
+vdefexpr: retcon			# 1 # { MOVC(bnode->number, bfeGetNextVarReg(bnode->memt)) }
+vdefexpr: retvar			# 2 # { BFE_DEF_TMP MOVV(bnode->reg, r) MOVV(r, bfeGetNextVarReg(bnode->memt)) }
+vdefexpr: retarr			# 2 # { BFE_DEF_TMP MOVV(bnode->reg, r) MOVM(r, bfeGetNextVarReg(bnode->memt)) }
+retexpr: retcon       			# 1 # { MOVC(bnode->number, REG_RET) }
+retexpr: retvar				# 1 # { if(strcmp(bnode->reg, REG_RET) != 0) { MOVV(bnode->reg, REG_RET) } }
+retexpr: retarr				# 1 # { MOVM(bnode->reg, REG_RET) } 
+bterm: bbasic				# 0 # ;
+bterm: LNOT(bterm)			# 0 # ;
+bterm: LOR(bterm,bterm)			# 0 # { printf("\tjmp "); bfePrintEnd(bnode,bnode->labelnr,bnode->ifnr,bnode->belseav); NL printf(".Z%d:\n", bnode->labelnr); NL } ;
+bbasic: LLESS(bexpr,bexpr)		# 2 # { CMP(RIGHT_CHILD(bnode)->reg, LEFT_CHILD(bnode)->reg) printf("\tjl "); bfePrintStart(bnode,bnode->labelnr,bnode->ifnr,bnode->belseav); NL  }
+bbasic: LNEQ(bexpr,bexpr)		# 2 # { CMP(RIGHT_CHILD(bnode)->reg, LEFT_CHILD(bnode)->reg) printf("\tjne "); bfePrintStart(bnode,bnode->labelnr,bnode->ifnr,bnode->belseav); NL  }
+bexpr: retcon 				# 1 # { BFE_NEXT_REG MOVC(bnode->number, r) }
+bexpr: retvar 				# 1 # { BFE_DEF_TMP MOVV(bnode->reg,r) bnode->reg = r; } ;
+bexpr: retarr 				# 0 # { char *r = malloc(strlen(bnode->reg)+3); sprintf(r, "(%s)", bnode->reg); bnode->reg = r; }
+retarr: ARR_DEREF(arrv,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDV(LEFT_CHILD(bnode)->reg, r)  }
+retarr: ARR_DEREF(arrv,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDV(LEFT_CHILD(bnode)->reg, r)  }
+retarr: ARR_DEREF(arrd,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDM(LEFT_CHILD(bnode)->reg, r) }
+retarr: ARR_DEREF(arrd,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDM(LEFT_CHILD(bnode)->reg, r)  }
+arrd: ARR_DEREF(arrd,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDM(LEFT_CHILD(bnode)->reg, r) }
+arrd: ARR_DEREF(arrd,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDM(LEFT_CHILD(bnode)->reg, r) }
+arrd: ARR_DEREF(arrv,retvar)		# 3 # { BFE_NEXT_REG MOVV(RIGHT_CHILD(bnode)->reg, r) MULC(8, r) ADDV(LEFT_CHILD(bnode)->reg, r)  }
+arrd: ARR_DEREF(arrv,retcon)		# 3 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULC(8,r) ADDV(LEFT_CHILD(bnode)->reg, r)  } 
+arrv: VARI				# 0 # bnode->reg = bfeGetVarReg(bnode->id, bnode->memt);
+retvar: ADD(retvar,retvar)		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) ADDV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: ADD(retvar,retcon)		# 2 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) ADDV(LEFT_CHILD(bnode)->reg, r) }
+retvar: ADD(retcon,retvar)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) ADDV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: ADD(retarr,retvar)		# 2 # { BFE_NEXT_REG MOVM(LEFT_CHILD(bnode)->reg, r) ADDV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: ADD(retvar,retarr)		# 2 # { BFE_NEXT_REG MOVM(RIGHT_CHILD(bnode)->reg, r) ADDV(LEFT_CHILD(bnode)->reg, r) }
+retvar: ADD(retarr,retcon)		# 2 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) ADDM(LEFT_CHILD(bnode)->reg, r) }
+retvar: ADD(retcon,retarr)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) ADDM(RIGHT_CHILD(bnode)->reg, r) }
+retvar: ADD(retarr,retarr)		# 2 # { BFE_NEXT_REG MOVM(LEFT_CHILD(bnode)->reg, r) ADDM(RIGHT_CHILD(bnode)->reg, r) } 
+retvar: SUB(retvar,retvar) 		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) SUBV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: SUB(retvar,retcon)		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) SUBC(RIGHT_CHILD(bnode)->number, r) }
+retvar: SUB(retcon,retvar)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) SUBV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: SUB(retarr,retvar)		# 2 # { BFE_NEXT_REG MOVM(LEFT_CHILD(bnode)->reg, r) SUBV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: SUB(retvar,retarr)		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) SUBM(RIGHT_CHILD(bnode)->reg, r) }
+retvar: SUB(retarr,retcon)		# 2 # { BFE_NEXT_REG MOVM(LEFT_CHILD(bnode)->reg, r) SUBC(RIGHT_CHILD(bnode)->number, r) }
+retvar: SUB(retcon,retarr)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) SUBM(RIGHT_CHILD(bnode)->reg, r) }
+retvar: SUB(retarr,retarr)		# 2 # { BFE_NEXT_REG MOVM(LEFT_CHILD(bnode)->reg, r) SUBM(RIGHT_CHILD(bnode)->reg, r) }
+retvar: MUL(retvar,retvar) 		# 2 # { BFE_NEXT_REG MOVV(LEFT_CHILD(bnode)->reg, r) MULV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: MUL(retvar,retcon)		# 2 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULV(LEFT_CHILD(bnode)->reg, r) }
+retvar: MUL(retcon,retvar)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) MULV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: MUL(retarr,retvar)		# 2 # { BFE_NEXT_REG MOVM(LEFT_CHILD(bnode)->reg, r) MULV(RIGHT_CHILD(bnode)->reg, r) }
+retvar: MUL(retvar,retarr)		# 2 # { BFE_NEXT_REG MOVM(RIGHT_CHILD(bnode)->reg, r) MULV(LEFT_CHILD(bnode)->reg, r) } 
+retvar: MUL(retarr,retcon)		# 2 # { BFE_NEXT_REG MOVC(RIGHT_CHILD(bnode)->number, r) MULM(LEFT_CHILD(bnode)->reg, r) }
+retvar: MUL(retcon,retarr)		# 2 # { BFE_NEXT_REG MOVC(LEFT_CHILD(bnode)->number, r) MULM(RIGHT_CHILD(bnode)->reg, r) }
+retvar: MUL(retarr,retarr)		# 2 # { BFE_NEXT_REG MOVM(LEFT_CHILD(bnode)->reg, r) MULM(RIGHT_CHILD(bnode)->reg, r) }
+retvar: VARI				# 0 # bnode->reg = bfeGetVarReg(bnode->id, bnode->memt);
+retcon: ADD(retcon,retcon)		# 0 # bnode->number = LEFT_CHILD(bnode)->number + RIGHT_CHILD(bnode)->number;
+retcon: SUB(retcon,retcon)		# 0 # bnode->number = LEFT_CHILD(bnode)->number - RIGHT_CHILD(bnode)->number; 
+retcon: MUL(retcon,retcon)		# 0 # bnode->number = LEFT_CHILD(bnode)->number * RIGHT_CHILD(bnode)->number; 
+retcon: CONST				# 0 # ; 
+
